@@ -1,0 +1,2103 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+  ---
+title: "Alkali bee microbiome - V4"
+author: "KMK"
+date: "Oct 2020"
+output: pdf_document
+---
+
+# Summary of the analysis and data
+
+This is an analysis of the 16S microbiome sequencing performed with alkali bee 
+samples from 2016. The sequences were processed with Qiime2.   
+
+The analysis pipeline is located in:    
+
+`/uufs/chpc.utah.edu/common/home/kapheim-group1/nmel_microbiome/qiime2/workflows/`
+
+
+The file is `workflow_qiime2_nmel_microbiome_sep2019.md`.
+
+# Summary of workflow
+
+Following phyloseq tutorials
+
+* https://vaulot.github.io/tutorials/Phyloseq_tutorial.html   
+* https://joey711.github.io/phyloseq/index.html    
+
+Following publishblished workflows    
+
+* _Bioconductor Workflow for Microbiome Data Analysis: from raw reads to community analyses_
+  + (https://f1000research.com/articles/5-1492/v2)
+
+# Basic setup before we begin analysis
+
+#### KNITR options
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include=TRUE, echo=TRUE , fig.width = 6, warning = FALSE, message = FALSE, fig.path='figures/')
+```
+
+
+Working directory
+
+```{r dir}
+getwd()
+#setwd("C:/Users/kapheimk/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020")
+```
+
+#### CRAN package
+
+```{r packages-1, eval=FALSE, echo = FALSE, include = FALSE}
+.cran_packages <- c("knitr", "phyloseqGraphTest", "phyloseq", "shiny",
+                  "miniUI", "caret", "pls", "e1071", "ggplot2", "randomForest",
+                  "vegan", "plyr", "dplyr", "ggrepel", "nlme",
+                  "reshape2","devtools", "PMA", "structSSI", "ade4",
+                  "igraph", "ggnetwork", "intergraph", "scales")
+.github_packages <- c("jfukuyama/phyloseqGraphTest")
+.bioc_packages <- c("phyloseq", "genefilter", "impute")
+
+
+# Install CRAN packages (if not already installed)
+.inst <- .cran_packages %in% installed.packages()
+if (any(!.inst)){
+  install.packages(.cran_packages[!.inst],repos = "http://cran.rstudio.com/")
+}
+
+.inst <- .github_packages %in% installed.packages()
+if (any(!.inst)){
+  devtools::install_github(.github_packages[!.inst])
+}
+
+.inst <- .bioc_packages %in% installed.packages()
+if(any(!.inst)){
+  source("http://bioconductor.org/biocLite.R")
+  BiocManager::install(.bioc_packages[!.inst])
+}
+```
+
+#### Libraries
+
+```{r packages-2, echo = FALSE}
+library(tidyverse); library("tidyverse")
+library(phyloseq)
+library(vegan)
+library(RVAideMemoire)
+library(qiime2R)
+library(ggplot2)
+library(Biostrings)
+library(plyr)
+library(dplyr)
+library(reshape2)
+library(devtools)
+library(data.table)
+library(nortest)
+library(glmm)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(car)
+library(DESeq2)
+library(microbiome)
+library(decontam)
+library(eBay)
+library(forcats)
+library(fitdistrplus)
+library(caret)
+library(dendextend)
+```
+
+#### Theme
+
+```{r theme, echo = FALSE, include = FALSE}
+theme_set(theme_bw())
+sample_colors <- c(
+  "#CBD588", "#5F7FC7", "orange","#DA5724", "#508578", "#CD9BCD",
+   "#AD6F3B", "#673770","#D14285", "#652926", "#C84248", 
+  "#8569D5", "#5E738F","#D1A33D", "#8A7C64", "#599861"
+)
+pal = "Dark2"
+scale_colour_discrete <-  function(palname=pal){
+  scale_colour_brewer(palette=palname)
+}
+scale_fill_discrete <-  function(palname=pal){
+  scale_fill_brewer(palette=palname)
+}
+theme(text = element_text(color="black",size = 14), 
+              axis.title = element_text(color="black"), 
+              axis.text.x = element_text(color="black",size = 12), 
+              axis.text.y = element_text(color="black",size = 12), 
+              legend.background = element_blank(),
+              panel.background = element_rect(fill = "white"),
+              panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.line = element_line(size = 0.5, linetype = "solid", 
+                                       colour = "black")) 
+```
+
+
+# Make phyloseq object
+
+#### Import files
+
+Following vignette from Qiime2R     
+[https://rdrr.io/github/jbisanz/qiime2R/f/vignettes/vignette.Rmd].
+
+```{r import-1a}
+meta.tsv <- read_tsv("sample_data.txt")
+meta.tsv$blank <- factor(meta.tsv$blank)
+meta.tsv$combo_name <- factor(meta.tsv$combo_name)
+meta.tsv$sample_type_order <- factor(meta.tsv$sample_type_order)
+meta.tsv$stage_type <- factor(meta.tsv$stage_type)
+meta.tsv$sample_type <- factor(meta.tsv$sample_type)
+meta.tsv$sample_type_collapsed <- factor(meta.tsv$sample_type_collapsed)
+meta.tsv$lab_type <- factor(meta.tsv$lab_type)
+meta.tsv$adult_types <- factor(meta.tsv$adult_types)
+meta.tsv$field_types <- factor(meta.tsv$field_types)
+meta.tsv$sperm <- factor(meta.tsv$sperm)
+meta.tsv$bed <- factor(meta.tsv$bed)
+SVs <- read_qza("nmel_v4_q2dada2_table_no-mito-chloro.qza")
+taxonomy <- read_qza("nmel_v4_SILVA_132_99_16S_taxonomy.qza")
+tree <- read_qza("rooted_tree.qza")
+```
+
+Import physiology data from Kapheim Johnson 2017 JExpBiol
+
+Copied from 
+`C:/Users/kapheimk/Documents/research/wkdir/nmel_phys/analyses_for_revisions/`
+
+```{r import-1b}
+nutrition <- read.csv("vitellogenesis_nurse_cell_data_sheets_m_latest_version_categories_01aug2017_workingcopy.csv", 
+                      stringsAsFactors=T,header=T)
+#nutrition <- nutrition.all[which(nutrition.all$discard_bc_sperm == "n"),]
+nutrition$max_stage <- pmax(nutrition$left_category, nutrition$right_category)
+nutrition$max_stage <- factor(nutrition$max_stage, ordered = TRUE)
+nutrition$any_resorb <- ifelse(nutrition$left_reabsorbing == "yes" | 
+                                 nutrition$right_reabsorbing == "yes", 1,0)
+```
+
+Merge physiology data with sample data
+
+```{r import-1c}
+colnames(nutrition)
+table(nutrition$tx)
+nutrition.r <- nutrition[, c("dissection_n", "sample", "tx", "thoraxwidth_mm", "dg_length_mm", 
+                             "sperm", "max_terminal_oocyte_mm", 
+                             "max_stage", "any_resorb")]
+colnames(nutrition.r)[1] <- "id"
+colnames(nutrition.r)[2] <- "sample_phys"
+colnames(nutrition.r)
+meta_nutr <- left_join(meta.tsv, nutrition.r, by = "id")
+colnames(meta_nutr)
+table(meta_nutr$tx)
+table(meta_nutr$sample_type)
+table(meta_nutr$sample_type, meta_nutr$tx)
+write.table(meta_nutr, file = "sample_data_phys.txt", 
+            sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+#### Make phyloseq object
+
+```{r import-2}
+physeq <- qza_to_phyloseq(features = "nmel_v4_q2dada2_table_no-mito-chloro.qza", 
+                          tree = "rooted_tree.qza", 
+                         taxonomy = "nmel_v4_SILVA_132_99_16S_taxonomy.qza", 
+                          metadata = "sample_data_phys.txt")
+physeq
+#physeq <- phyloseq(otu_table(SVs$data, taxa_are_rows = T), 
+#  phy_tree(tree$data), 
+#  tax_table(as.data.frame(taxonomy) %>% select(-Confidence), 
+# %>% column_to_rownames("Feature.ID") %>% as.matrix()), 
+#  #moving the taxonomy to the way phyloseq wants it
+#  sample_data(meta.tsv %>% as.data.frame() %>% column_to_rownames("sampleid"))
+#  )
+```
+
+The number of taxa match the number of features in the OTU table.   
+Phyloseq must do that when it imports  
+
+
+## Check to make sure samples in metadata and feature table match up
+
+```{r import-4}
+length(setdiff(meta.tsv$id, colnames(SVs$data)))
+(setdiff(meta.tsv$id, colnames(SVs$data)))
+length(setdiff(colnames(SVs$data), meta.tsv$id))
+length(setdiff(rownames(SVs$data), taxonomy$data$Feature.ID))
+length(setdiff(taxonomy$data$Feature.ID, rownames(SVs$data)))
+```
+
+7 samples were excluded when imported into phyloseq - apparently 0 reads
+
+The 248 taxa difference is likely those dropped as mito and chloro when the physeq was made
+
+## Convert the taxonomy table into a tabular split version     
+
+Also check number of unique taxa in the taxonomy table and the tree    
+
+```{r import-5, eval=FALSE, include=FALSE, echo=FALSE}
+taxtable <- taxonomy$data %>% as.tibble() %>% separate(Taxon,
+  sep=";", c("Kingdom","Phylum","Class","Order","Family","Genus","Species"))
+head(taxtable)
+# How many unique taxa?
+length(unique(taxtable[["Feature.ID"]]))
+tree$data
+```
+
+Get some basic stats
+
+
+```{r import-6, include = FALSE}
+ntaxa(physeq)
+nsamples(physeq)
+sample_names(physeq)[1:5]
+rank_names(physeq)
+sample_variables(physeq)
+otu_table(physeq)[1:3, 1:3]
+tax_table(physeq)[1:5, 1:4]
+phy_tree(physeq)
+taxa_names(physeq)[1:10]
+```
+
+
+# Preprocessing     
+Following tutorial [https://joey711.github.io/phyloseq/preprocess.html]   
+
+## Decontaminate
+
+Following https://benjjneb.github.io/decontam/vignettes/decontam_intro.html
+
+#### Inspect library sizes
+
+```{r decon-1}
+all.samples.df <- as.data.frame(sample_data(physeq))
+all.samples.df$controls <- as.factor(ifelse(all.samples.df$blank == "blank", "blank", "sample"))
+all.samples.df$LibrarySize <- sample_sums(physeq)
+all.samples.df <- all.samples.df[order(all.samples.df$LibrarySize),]
+all.samples.df$Index <- seq(nrow(all.samples.df))
+ggplot(data = all.samples.df, 
+       aes(x = Index, y = LibrarySize, color = controls )) + 
+  geom_point()
+ggplot(data = all.samples.df, 
+       aes(x = Index, y = LibrarySize, color = controls )) + 
+  ylim(0,10000) + 
+  geom_point()
+ggplot(data = all.samples.df, 
+       aes(x = Index, y = LibrarySize, color = sample_type )) + 
+  ylim(0,10000) + 
+  geom_point()
+```
+
+None of the blanks have more than 2500 reads.  
+But several of the samples have fewer than the blanks!  
+
+#### Identify contaminants - Prevalence
+
+Identifies contaminants based on presence/absence across samples and controls.
+
+```{r decon-2}
+sample_data(physeq)$is.neg <- sample_data(physeq)$blank == "blank"
+contamdf.prev <- isContaminant(physeq, method = "prevalence", neg="is.neg")
+table(contamdf.prev$contaminant)
+head(which(contamdf.prev$contaminant))
+contamdf.prev[contamdf.prev[,"contaminant"] == "TRUE",]
+
+```
+
+Only identifies 2 contaminants at the 0.1 threshold.
+
+Changing the threshold to 0.5 will identify contaminants as seqs that are \
+more prevalent in controls than in samples.
+
+```{r decon-3}
+contamdf.prev05 <- isContaminant(physeq, method = "prevalence", neg="is.neg",
+                                 threshold = 0.5)
+table(contamdf.prev05$contaminant)
+contamdf.prev05[contamdf.prev05[,"contaminant"] == "TRUE",]
+```
+
+Same two seqs. So that is good.  
+
+How many times did these taxa show up in each sample type?
+
+```{r decon-4}
+# transform to presence/absence
+ps.pa <- transform_sample_counts(physeq, function(abund) 1*(abund>0))
+ps.pa.neg <- prune_samples(sample_data(ps.pa)$blank == "blank", ps.pa)
+ps.pa.pos <- prune_samples(sample_data(ps.pa)$blank != "blank", ps.pa)
+# make data frame with number of samples each taxa is present in
+df.pa <- data.frame(pa.pos = taxa_sums(ps.pa.pos), pa.neg = taxa_sums(ps.pa.neg),
+                    contaminant = contamdf.prev$contaminant)
+# plot each taxa as a function of number of samples found in
+ggplot(data = df.pa, aes(x = pa.neg, y = pa.pos, color = contaminant)) + 
+  geom_point() +
+  xlab("Prevalence (negative controls)") + 
+  ylab("Prevalence (samples)")
+```
+
+One of the contaminants shows up in all 5 blanks, and most of the samples. 
+The other contaminant shows up in 2 of the blanks and just a handful of samples.
+
+#### Examine taxa in blanks that were not removed
+
+There were three additional taxa that were detected in 1 blank and > 0 samples.    
+Need to see what the abundance of these taxa are in the samples and blanks to explore possibility 
+of tag-jumping.   
+
+```{r decon-5}
+df.pa[which(df.pa$pa.neg >= 1 & df.pa$pa.pos > 0 & df.pa$contaminant == "FALSE"),]
+suspect_taxa <- rownames(df.pa[which(df.pa$pa.neg >= 1 & df.pa$pa.pos > 0 
+                                     & df.pa$contaminant == "FALSE"),])
+physeq.suspect = prune_taxa(suspect_taxa, physeq)
+suspect.df = psmelt(physeq.suspect)
+suspect.df[which(suspect.df$blank == "blank"),c("OTU","blank","Abundance")]
+```
+
+There are two taxa to explore:
+
+cd1e10bc6b95fd6a15e91d2e8d188b3e
+
+fb5c2aa7e7a97d1ba29b2c9405cb6a41
+
+###### suspect 8b3e 
+
+Explore how many samples have abundance twice as great as that of the abundance in the negative control
+
+```{r decon-6}
+suspect.8b3e <- suspect.df[which(suspect.df$blank == "sample" & 
+                   suspect.df$OTU == "cd1e10bc6b95fd6a15e91d2e8d188b3e"),
+           c("OTU","sample_type","Abundance")]
+summary(suspect.8b3e$Abundance)
+suspect.8b3e$Abundance
+suspect.df[which(suspect.df$blank == "sample" & 
+                   suspect.df$OTU == "cd1e10bc6b95fd6a15e91d2e8d188b3e" & 
+                     suspect.df$Abundance < 2*268 & 
+                   suspect.df$Abundance > 0),
+           c("OTU","Sample","sample_type","Abundance")]
+samples2adjust.8b3e <- suspect.df[which(suspect.df$blank == "sample" & 
+                   suspect.df$OTU == "cd1e10bc6b95fd6a15e91d2e8d188b3e" & 
+                     suspect.df$Abundance < 2*268 & 
+                   suspect.df$Abundance > 0),"Sample"]
+```
+
+This taxa is highly abundant in several samples (>100,000 reads) 
+and moderately abundant in the blank (268 reads)     
+It has low abudance in several samples, especially cell walls, 
+the presence of this taxa in those samples could be from contamination.    
+To be conservative, remove this taxa from samples in which is was detected 
+< 2X that of the blank, so 2*268. 
+This means I will need to eliminate the taxa from 9 samples 
+(listed in samples2adjust.8b3e). 
+ 
+###### suspect 6a41 
+
+```{r decon-7}
+
+suspect.6a41 <- suspect.df[which(suspect.df$blank == "sample" & 
+                   suspect.df$OTU == "fb5c2aa7e7a97d1ba29b2c9405cb6a41"),
+           c("OTU","sample_type","Abundance")]
+summary(suspect.6a41$Abundance)
+suspect.6a41$Abundance
+suspect.df[which(suspect.df$blank == "sample" & 
+                   suspect.df$OTU == "fb5c2aa7e7a97d1ba29b2c9405cb6a41" & 
+                     suspect.df$Abundance < 2*4 & 
+                   suspect.df$Abundance > 0),
+           c("OTU","Sample","sample_type","Abundance")]
+```
+
+
+This taxa is highly abundant in several samples (close to 20K reads) 
+but with low abundance in the blank (4 reads)     
+It has higher abundance in all of the samples than in the blanks, suggesting  
+the presence of this taxa in those samples is unlikely from contamination.    
+To be conservative, remove this taxa from samples in which is was detected 
+< 2X that of the blank, so 2*4. 
+This does not require any changes, because all samples have >>> abundance than 8. 
+ 
+
+#### Remove contaminants and blanks
+
+```{r decon-8}
+# remove contaminant taxa
+summary(sample_data(physeq)$blank)
+contams <- row.names(contamdf.prev05[contamdf.prev05[,"contaminant"] == "FALSE",])
+length(contams)
+ps.decon <- prune_taxa(contams, physeq)
+# remove negative controls (blanks)
+ps.decon <- prune_samples(sample_data(ps.decon)$blank != "blank", ps.decon)
+physeq
+ps.decon
+summary(sample_data(ps.decon)$sample_type)
+# remove 8b3e from specific samples
+otu_table(ps.decon)["cd1e10bc6b95fd6a15e91d2e8d188b3e",samples2adjust.8b3e]
+otu_table(ps.decon)["cd1e10bc6b95fd6a15e91d2e8d188b3e",samples2adjust.8b3e] <- 0
+otu_table(ps.decon)["cd1e10bc6b95fd6a15e91d2e8d188b3e",samples2adjust.8b3e]
+ps.decon
+```
+
+8 fewer samples (blanks) and 2 fewer taxa (contaminants)
+
+## Filter taxa
+
+#### Look at distribution of taxa by Phylum 
+
+```{r ftax-1}
+table(tax_table(ps.decon) [, "Phylum"], exclude = NULL)
+ps.decon.ftax <- subset_taxa(ps.decon, !is.na(Phylum))
+ps.decon
+ps.decon.ftax
+```
+
+Removed 48 taxa not assigned to a phylum
+
+#### Assess feature prevalence   
+
+How many samples does each taxa show up in at least once?   
+Are there phyla that are comprised of mostly low-prevalence features?   
+Compute the total and average prevalences of the features in each phylum.
+
+```{r ftax-2}
+# Compute prevalence of each feature, store as data.frame
+prevdf = apply(X = otu_table(ps.decon.ftax),
+                 MARGIN = ifelse(taxa_are_rows(ps.decon.ftax), yes = 1, no = 2),
+                 FUN = function(x){sum(x > 0)})
+# Add taxonomy and total read counts to this data.frame
+prevDF = data.frame(Prevalence = prevdf,
+                      TotalAbundance = taxa_sums(ps.decon.ftax),
+                      tax_table(ps.decon.ftax))
+```
+
+
+#### Prevalence vs total read count 
+
+In this plot, each point is a different taxa.   
+
+```{r ftax-3, fig.width = 12}
+ggplot(prevDF, aes(Prevalence, TotalAbundance)) + 
+  geom_point(size = 4, alpha = 0.75) + 
+  scale_y_log10()
+```
+
+It shows the fraction of samples that each taxa within a phylum are found in.   
+Use this to eyeball selection of a minimum prevalence cutoff.   
+For now, I set the dotted line at 5% to see if that seems like a reasonable cutoff.   
+
+```{r ftax-4, fig.width=12}
+ggplot(prevDF, aes(TotalAbundance, Prevalence / nsamples(ps.decon.ftax),
+                   color=Phylum)) + 
+  # Include a guess for parameter
+  geom_hline(yintercept = 0.05, alpha = 0.5, linetype = 2) + 
+  geom_point(size = 2, alpha = 0.7) +
+  scale_x_log10() +  xlab("Total Abundance") + 
+  ylab("Prevalence [Frac. Samples]") +
+  facet_wrap(~Phylum) + 
+  theme(legend.position="none")  
+```
+
+#### Plot the frequency of taxa
+
+```{r ftax-5}
+# Determine the cutoff for OTU filtering
+tdt = data.table(tax_table(ps.decon.ftax),
+                 TotalCounts = taxa_sums(ps.decon.ftax),
+                 OTU = taxa_names(ps.decon.ftax))
+tdt[(TotalCounts <= 2), .N]
+ggplot(tdt, aes(TotalCounts)) + 
+  geom_histogram() + 
+  ggtitle("Histogram of Total Counts")
+```
+
+
+```{r ftax-6}
+# taxa cumulative sum
+taxcumsum = tdt[, .N, by = TotalCounts]
+setkey(taxcumsum, TotalCounts)
+taxcumsum[, CumSum := cumsum(N)]
+# Define the plot
+pCumSum = ggplot(taxcumsum, aes(TotalCounts, CumSum)) + 
+  geom_point() +
+  xlab("Filtering Threshold, Minimum Total Counts") +
+  ylab("taxa Filtered") +
+  ggtitle("taxa that would be filtered vs. the minimum count threshold")
+pCumSum
+```
+
+Zoom-in
+
+```{r ftax-7}
+pCumSum + xlim(0, 100)
+```
+
+
+#### Remove taxa not seen at least 25 times in at least 2 samples   
+
+```{r ftax-8}
+#prevalenceThreshold = 0.015 * nsamples(ps.decon.ftax)
+prevalenceThreshold = 2
+freqThreshold = 25
+keepTaxa <- rownames(prevDF)[prevDF$Prevalence >= 
+                               prevalenceThreshold & 
+                               prevDF$TotalAbundance > freqThreshold]
+length(keepTaxa)
+ps.decon.ftax
+ps.decon.ftax2 <- prune_taxa(keepTaxa, ps.decon.ftax)
+ps.decon.ftax2
+```
+
+This leaves 1,334 taxa in 81 samples
+
+## Filter samples
+
+#### First get some summary statistics for sequencing depth
+
+
+```{r fsam-1}
+min(sample_sums(ps.decon.ftax2))
+max(sample_sums(ps.decon.ftax2))
+mean(sample_sums(ps.decon.ftax2))
+median(sample_sums(ps.decon.ftax2))
+sdt <- data.table(as(sample_data(ps.decon.ftax2), "data.frame"),
+                  TotalReads = sample_sums(ps.decon.ftax2), 
+                  keep.rownames = TRUE)
+setnames(sdt, "rn", "SampleID")
+ggplot(sdt, aes(TotalReads)) + 
+  geom_histogram() + 
+  ggtitle("sequencing depth") + 
+  xlab("read counts") + 
+  facet_wrap(~sample_type_collapsed)
+```
+
+Zoom-in
+
+```{r fsam-2}
+ggplot(sdt, aes(TotalReads)) + 
+  geom_histogram() + 
+  ggtitle("sequencing depth") + 
+  xlab("read counts") + 
+  xlim(0,10000) + 
+  facet_wrap(~sample_type_collapsed)
+```
+
+#### Remove samples with fewer than 400 reads
+
+```{r fsam-3}
+table(sample_data(ps.decon.ftax2)$sample_type)
+table(sample_data(ps.decon.ftax2)$sample_type_collapsed)
+ps.decon.ftax2.fsam <- prune_samples(sample_sums(ps.decon.ftax2) >= 400, ps.decon.ftax2)
+table(sample_data(ps.decon.ftax2.fsam)$sample_type)
+table(sample_data(ps.decon.ftax2.fsam)$sample_type_collapsed)
+ps.decon.ftax2.fsam
+```
+
+#### Remove lab female with alfalfa    
+
+There is just one lab-reared female left who got alfalfa. 
+She probably should not be part of the lab-reared females who received sterile 
+food. Remove her. 
+
+```{r fsam-4}
+ps.decon.ftax2.fsam2 <- subset_samples(ps.decon.ftax2.fsam, sample_type != "sugar_pollen_alfalfa")
+table(sample_data(ps.decon.ftax2.fsam2)$sample_type)
+```
+
+## Final pre-processing steps
+
+#### Rename to simplify
+
+```{r prep-1}
+ps <- ps.decon.ftax2.fsam2 
+```
+
+
+#### Transform and rarefy
+
+
+```{r prep-2}
+ps.rab <- transform_sample_counts(ps, function(x) x/sum(x))
+ps.log <- transform_sample_counts(ps, function(x) log(1 + x))
+ps.rare <- rarefy_even_depth(ps, rngseed = 123)
+ps.rare.rab <- transform_sample_counts(ps.rare, function(x) x/sum(x))
+ps.rare.log <- transform_sample_counts(ps.rare, function(x) log(1 + x))
+min(sample_sums(ps.rare))
+max(sample_sums(ps.rare))
+# also make a non-filtered rarefied set for alpha diversity
+ps.decon.rare <- rarefy_even_depth(ps.decon, rngseed = 123, sample.size = 486)
+ps.decon.rare
+```
+
+#### Subset
+
+1. Create a subset that is only the adult females.
+
+```{r prep-3}
+ps.adult <- subset_samples(ps, stage_type == "adult")
+ps.adult
+ps.adult.rab <- transform_sample_counts(ps.adult, function(x) x / sum(x) )
+ps.adult.log <- transform_sample_counts(ps.adult, function(x) log(1 + x))
+```
+
+
+2. Samples from the field.
+
+```{r prep-4}
+ps.field <- subset_samples(ps, field_types != "")
+ps.field
+ps.field.rab <- transform_sample_counts(ps.field, function(x) x / sum(x) )
+ps.field.log <- transform_sample_counts(ps.field, function(x) log(1 + x))
+```
+
+3.  lab-reared females
+
+```{r prep-5}
+ps.lab <- subset_samples(ps, lab_type != "")
+ps.lab
+ps.lab.rab <- transform_sample_counts(ps.lab, function(x) x / sum(x) )
+ps.lab.log <- transform_sample_counts(ps.lab, function(x) log(1 + x))
+```
+
+Only 6 samples
+
+# Effect of diet in the lab
+
+First, we look for differences in the gut microbiomes of newly emerged females 
+reared in the lab for 10 days on different diets. 
+
+```{r lab-1}
+pca.ps.lab <- ordinate(ps.lab, "PCoA", distance = "bray") 
+p.pca.ps.lab <- plot_ordination(ps.lab, pca.ps.lab, color="lab_type", 
+                                shape="bed" )  + 
+  geom_point(size=4, alpha = 1) + 
+  scale_shape_manual(values=c(15, 19, 17,8)) + 
+  scale_color_manual(values = sample_colors)
+p.pca.ps.lab
+```
+
+## Ordination
+
+#### pca on relative abundance
+
+```{r lab-2}
+pca.ps.rab.lab <- ordinate(ps.lab.rab, "PCoA", distance = "bray") 
+p.pca.ps.lab <- plot_ordination(ps.lab.rab, pca.ps.rab.lab, color="lab_type", 
+                                shape="bed" )  + 
+  geom_point(size=4, alpha = 1) + 
+  scale_shape_manual(values=c(15, 19, 17,8)) + 
+  scale_color_manual(values = sample_colors)
+p.pca.ps.lab
+```
+
+#### pca on log-transformed
+
+```{r lab-3}
+pca.ps.log.lab <- ordinate(ps.lab.log, "PCoA", distance = "bray") 
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_lab_pca_log-FigS1.svg")
+p.pca.ps.lab <- plot_ordination(ps.lab.log, pca.ps.log.lab, color="lab_type", 
+                                shape="bed" )  + 
+  geom_point(size=4, alpha = 1) + 
+  scale_shape_manual(values=c(15, 19, 17,18),
+                     name = "Bee bed of origin",
+                     labels = c("A", "B", "C", "D")) + 
+  scale_color_manual(values = sample_colors, 
+                     name = "Sample type", 
+                     labels = c("Sugar + pollen",
+                                "Sugar only")) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.margin = margin(t = 0.5, unit = "mm"))
+print(p.pca.ps.lab)
+dev.off()
+p.pca.ps.lab
+```
+
+Really hard to tell much with only 6 samples!
+
+## Formally test for differences due to diet
+
+```{r lab-4}
+# make distance matrix
+bc.ps.lab.rab <- phyloseq::distance(ps.lab.rab, method = "bray")
+# convert sample data to data frame
+samples.ps.lab <- phyloseq::sample_data(ps.lab.rab)
+# adonis
+adonis.ps.lab.t <- vegan::adonis2(bc.ps.lab.rab ~ samples.ps.lab$lab_type , 
+                                  permutations = 9999, 
+                                  strata=samples.ps.lab$bed)
+adonis.ps.lab.t
+pw_type_adonis.ps.lab.t <- pairwise.perm.manova(bc.ps.lab.rab, 
+                                                samples.ps.lab$lab_type, 
+                                                p.method = "BH", nperm = 9999)
+pw_type_adonis.ps.lab.t
+pw_bed_adonis.ps.lab.t <- pairwise.perm.manova(bc.ps.lab.rab, 
+                                               samples.ps.lab$bed, 
+                                               p.method = "BH", nperm = 9999)
+pw_bed_adonis.ps.lab.t
+```
+
+There are no significant differences between diet treatments among lab-reared females. 
+I will therefore collapse them for all further analyses.
+
+
+# Ordination plots
+
+Let's see how the samples relate to each other based on overall microbiome profile    
+Use the log-transformed values    
+
+Thoughts on whether to use a log-transformation or not from http://ordnews.colostate.narkive.com/lMWF502c/ordnews-1593-log-sqrt-and-other-transformation-with-bray-curtis-dissimilarity:
+
+> Bray-Curtis values will be dominated by dominant species if no transformation is
+applied to the raw data.  transformation
+can change a multiplicative scale into an additive one, and that transformations
+(in ordination analyses) aid in accounting for the effect of ?dominant versus
+rare species? in a data set of ?species x site abundances?. I always remember
+Legendre and Legendre 1998 in that the amount of information that a species
+contributes to a numerical analysis (like an ordination) increases with its
+variance; however higher variance does not necessarily mean more important
+biological meaning. Therefore those species extremely abundant in some sites and
+poorly represented in others will dominate a MDS ordination of sites, and in
+those circumstances we will be unable to detect the effect of other species
+which might also be of biological interest.
+log transformation (and square root among others) gives the scale a
+convex transformation which is often very helpful. It tends to
+emphasize differences in smaller values and de-emphasize small
+differences in large values. E.g. cover of 1% vs 2% is difference of 1%
+but an increase of 100%. 50% percent cover vs 51% cover is also a
+difference of 1% but a negligible increase on a relative scale.
+Remember, BC sums before division, rather than averaging species
+relative differences. So, if the original scale was broad, a log
+transform can be very useful in down-weighting dominants and bringing
+out the signal is lesser species.
+
+
+#### PCoA with Bray-Curtis dissimilarity 
+
+Raw data
+
+```{r ordination-0}
+ord.pcoa.bray <- ordinate(ps, method = "PCoA", distance = "bray")
+plot_ordination(ps, ord.pcoa.bray, type = "samples)", 
+                color = "sample_type_collapsed", shape = "bed") + 
+  geom_point(size = 4, alpha = 1) + 
+  scale_shape_manual(values = c(15,19,17,18)) + 
+  scale_color_manual(values = sample_colors) 
+```
+
+Log-transformed data
+
+```{r ordination-1}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_pca_log-Fig1A.svg")
+ord.log.pcoa.bray <- ordinate(ps.log, method = "PCoA", distance = "bray")
+p.pca.log <- plot_ordination(ps.log, ord.log.pcoa.bray, type = "samples)", 
+                color = "sample_type_order", shape = "bed") + 
+  geom_point(size = 4, alpha = 1) + 
+  scale_shape_manual(values = c(15,19,17,18), 
+                     name="Bee bed of origin", 
+                     labels = c("A","B","C","D")) + 
+  scale_color_manual(values = sample_colors, 
+                     name = "Sample type", 
+                     labels = c("Cell walls", 
+                                "Pollen balls", 
+                                "Small larvae", 
+                                "Pre-pupae", 
+                                "Newly emerged females", 
+                                "Lab-reared females", 
+                                "Nesting females")) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.margin = margin(t = 0.5, unit = "mm"))
+print(p.pca.log)
+dev.off()
+p.pca.log
+```
+
+
+On relative abundance
+
+```{r ordination-2}
+ord.relab.pcoa.bray <- ordinate(ps.rab, method = "PCoA", distance = "bray")
+plot_ordination(ps.rab, ord.relab.pcoa.bray, type = "samples", 
+                color = "sample_type_collapsed", shape = "bed") + 
+  geom_point(size=4, alpha = 1) + 
+  scale_shape_manual(values = c(15,19,17,18)) +
+  scale_color_manual(values = sample_colors)
+```
+ 
+
+Rarefied data
+
+```{r ordination-3}
+ord.rare.pcoa.bray <- ordinate(ps.rare, method = "PCoA", distance = "bray")
+plot_ordination(ps.rare, ord.rare.pcoa.bray, type = "samples)", 
+                color = "sample_type_collapsed", shape = "bed") + 
+  geom_point(size=4, alpha = 1) + 
+  scale_shape_manual(values = c(15,19,17,18)) + 
+  scale_color_manual(values = sample_colors)
+```
+
+#### PCoA with weighted unifrac 
+
+Log-transformed
+
+```{r ordination-4}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_pca_wufc_log-FigS2.svg")
+ord.pcoa.wuf <- ordinate(ps.log, method = "PCoA", distance = "wunifrac")
+p.pca.wufc.log <- plot_ordination(ps.log, ord.pcoa.wuf, type = "samples", 
+                color = "sample_type_order", shape = "bed") + 
+  geom_point(size=4, alpha = 1) + 
+  scale_shape_manual(values = c(15,19,17,18), 
+                     name="Bee bed of origin", 
+                     labels = c("A","B","C","D")) + 
+  scale_color_manual(values = sample_colors, 
+                     name = "Sample type", 
+                     labels = c("Cell walls", 
+                                "Pollen balls", 
+                                "Small larvae", 
+                                "Pre-pupae", 
+                                "Newly emerged females", 
+                                "Lab-reared females", 
+                                "Nesting females")) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.margin = margin(t = 0.5, unit = "mm"))
+print(p.pca.wufc.log)
+dev.off()
+p.pca.wufc.log
+```
+
+Relative abundance
+
+```{r ordination-5}
+ord.rab.pcoa.wuf <- ordinate(ps.rab, method = "PCoA", distance = "wunifrac")
+plot_ordination(ps.rab, ord.rab.pcoa.wuf, type = "samples", 
+                color = "sample_type_collapsed", shape = "bed") + 
+  geom_point(size=4, alpha = 1) + 
+  scale_shape_manual(values = c(15,19,17,18)) + 
+  scale_color_manual(values = sample_colors)
+```
+
+Rarefied data
+
+```{r ordination-6}
+ord.rare.pcoa.wuf <- ordinate(ps.rare, method = "PCoA", distance = "wunifrac")
+plot_ordination(ps.rare, ord.rare.pcoa.wuf, type = "samples", 
+                color = "sample_type_collapsed", shape = "bed") + 
+  geom_point(size=4, alpha = 1) + 
+  scale_shape_manual(values = c(15,19,17,18)) + 
+  scale_color_manual(values = sample_colors)
+```
+
+# Overall group differences
+
+Following advice from https://github.com/joey711/phyloseq/issues/689.
+I am using distance matrices based on relative abundance as a normalization method, 
+since I did not rarefy the data.
+I am also doing this with two differennt models. In one, bed of origin is included 
+as a factor in the model. In the second instance, I stratified permutations across 
+bed of origin. These two methods should deal with pseudo-replication.
+
+#### Relative abundance
+
+```{r adonis-1}
+bc.ps.t <- phyloseq::distance(ps.rab, method = "bray")
+samples.ps <- phyloseq::sample_data(ps)
+adonis.ps.t <- vegan::adonis2(bc.ps.t ~ samples.ps$sample_type_collapsed + 
+                                samples.ps$bed, permutations = 9999)
+adonis.ps.t
+pw_type_adonis.ps.t <- pairwise.perm.manova(bc.ps.t, 
+                                            samples.ps$sample_type_collapsed, 
+                                            p.method = "BH", 
+                                            nperm = 9999)
+pw_type_adonis.ps.t
+pw_bed_adonis.ps.t <- pairwise.perm.manova(bc.ps.t, 
+                                           samples.ps$bed, 
+                                           p.method = "BH", 
+                                           nperm = 9999)
+pw_bed_adonis.ps.t
+```
+
+The only sample types that are not significiantly different are the 
+lab-reared females vs. newly emerged females and small larvae vs. pollen ball. 
+Newly emerged females and prepup are marginally significant.
+There are marginally significant differences between Anderson & Buckley & Henry.
+
+#### Stratify across bed
+
+
+Test effect of stratifying across bed, since I am not sure if I should be doing that or not
+
+```{r adonis-2}
+adonis.strata.ps.t <- vegan::adonis2(bc.ps.t ~ samples.ps$sample_type_collapsed, 
+                                     permutations = 9999, 
+                                     strata=samples.ps$bed)
+adonis.strata.ps.t
+```
+
+These results do not change when we stratify across bed of origin.
+
+#### Rarefied data
+
+```{r adonis-3}
+bc.ps.rare.t <- phyloseq::distance(ps.rare.rab, method = "bray")
+samples.ps.rare <- phyloseq::sample_data(ps.rare)
+adonis.ps.rare.t <- vegan::adonis2(bc.ps.rare.t ~ samples.ps.rare$sample_type_collapsed + 
+                                samples.ps.rare$bed, 
+                              permutations = 9999)
+adonis.ps.rare.t
+pw_type_adonis.ps.rare.t <- pairwise.perm.manova(bc.ps.rare.t, 
+                                            samples.ps.rare$sample_type_collapsed, 
+                                            p.method = "BH", 
+                                            nperm = 9999)
+pw_type_adonis.ps.rare.t
+pw_bed_adonis.ps.rare.t <- pairwise.perm.manova(bc.ps.rare.t, 
+                                           samples.ps.rare$bed, 
+                                           p.method = "BH", 
+                                           nperm = 9999)
+pw_bed_adonis.ps.rare.t
+```
+
+Results are basically the same with rarefied data!    
+Non-significant differences between lab-reared and newly emerged females     
+Non-significant difference between pollen ball & small larvae    
+Marginal differences between newly emerged female and prepup   
+
+# Dispersion
+
+It is important to know how much of thes significnat differences in overall 
+microbiome composition found with adonis are due to differences in dispersion 
+(i.e., variance) within the sample type.
+
+#### Relative abundance
+
+Sample types
+
+```{r dispersion -1}
+beta.ps.t <- betadisper(bc.ps.t, samples.ps$sample_type_collapsed)
+beta.ps.t
+beta.ps.t.an <- anova(beta.ps.t)
+beta.ps.t.an
+beta.ps.t.test <- permutest(beta.ps.t, control = permControl(nperm = 9999),  
+                            pairwise=TRUE)
+beta.ps.t.test
+beta.ps.t.HSD <- TukeyHSD(beta.ps.t)
+beta.ps.t.HSD
+```
+
+Significant differences between:
+pollen ball vs cell wall
+small larvae vs cell wall
+pollen ball vs lab-reraed female
+small larvae vs lab-reraed female
+pollen ball vs new female
+small larvae vs new female
+
+
+Basically, pollen balls and small larvae have low beta diversity, which seems surprising?    
+Suggests female alkali bees make pollen balls pretty uniform?    
+Maybe because they are using primarily alfalfa?   
+
+Plot differences
+
+```{r dispersion -2a}
+boxplot(beta.ps.t, las = 3, xlab = "")
+```
+
+```{r dispersion-2b}
+samples.ps.rab <- as.data.frame(phyloseq::sample_data(ps.rab))
+betas <- as.data.frame(beta.ps.t$distances)
+samples.ps.rab.betas <- merge(samples.ps.rab, betas, by = 0)
+dim(samples.ps.rab.betas)
+colnames(samples.ps.rab.betas)[25] <- "beta_distance"
+colnames(samples.ps.rab.betas)
+samples.ps.rab.betas %>%
+  group_by(sample_type_collapsed, sample_type_order) %>% 
+  summarise_at(vars(beta_distance), funs(median(., na.rm = TRUE)))
+```
+
+
+```{r dispersion-2c}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_beta-Fig2A.svg")
+p.beta <- ggplot(samples.ps.rab.betas, aes(x = sample_type_order, 
+                                    y = beta_distance)) + 
+        geom_boxplot(fill = "#00a5a9") + 
+        geom_jitter(color = "black", fill = "#acacac", pch = 21, size = 3, alpha = 0.7,
+                    position = position_jitter(width=0.3)) + 
+        annotate("text",x=1,y=1.05,label="ad") +
+        annotate("text",x=2,y=1.05	,label="bc") +
+        annotate("text",x=3,y=1.05,label="bc") +
+        annotate("text",x=4,y=1.05,label="cd") +
+        annotate("text",x=5,y=1.05,label="ad") +
+        annotate("text",x=6,y=1.05,label="ad") +
+        annotate("text",x=7,y=1.05,label="cd") +
+        scale_y_continuous(name = "Distance to centroid") +
+        scale_x_discrete(palette = pal,
+                         name = "Sample type", 
+                         labels=c("Cell\nwalls", 
+                                  "Pollen\nballs", 
+                                  "Small\nlarvae", 
+                                  "Pre-pupae", 
+                                  "Newly\nemerged\nfemales", 
+                                  "Lab-reared\nfemales",
+                                  "Nesting\nfemales")) + 
+        theme(text = element_text(color="black",size = 14), 
+              axis.title = element_text(color="black"), 
+              axis.text.x = element_text(color="black",size = 10), 
+              axis.text.y = element_text(color="black",size = 12), 
+              legend.position = 'none', 
+              legend.background = element_blank(),
+              legend.title = element_blank(),
+              panel.background = element_rect(fill = "white"),
+              panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.line = element_line(size = 0.5, 
+                                       linetype = "solid", 
+                                       colour = "black"))
+print(p.beta)
+dev.off()
+p.beta
+```
+
+
+
+Beds
+
+```{r dispersion-3}
+beta.ps.t.bed <- betadisper(bc.ps.t, samples.ps$bed)
+beta.ps.t.bed
+beta.ps.t.bed.an <- anova(beta.ps.t.bed)
+beta.ps.t.bed.an
+beta.ps.t.bed.test <- permutest(beta.ps.t.bed, control = permControl(nperm = 9999), 
+                                pairwise=TRUE)
+beta.ps.t.bed.test
+beta.ps.t.bed.HSD <- TukeyHSD(beta.ps.t.bed)
+beta.ps.t.bed.HSD
+```
+
+```{r dispersion-4}
+boxplot(beta.ps.t.bed, las = 3, xlab = "")
+#plot(TukeyHSD(beta.ps.t.bed))
+```
+
+No significant differences in dispersion among beds.    
+So beds have similar microbiome profiles.
+
+#### Rarefied data (transformed - relative abundance)
+
+Sample types
+
+```{r dispersion-5}
+beta.ps.rare <- betadisper(bc.ps.rare.t, samples.ps.rare$sample_type_collapsed)
+beta.ps.rare
+beta.ps.rare.an <- anova(beta.ps.rare)
+beta.ps.rare.an
+beta.ps.rare.test <- permutest(beta.ps.rare, control = permControl(nperm = 9999),  
+                            pairwise=TRUE)
+beta.ps.rare.test
+beta.ps.rare.HSD <- TukeyHSD(beta.ps.rare)
+beta.ps.rare.HSD
+```
+
+Results basically the same.
+
+Significant differences between:
+pollen ball vs cell wall
+small larvae vs cell wall
+pollen ball vs lab-reraed female
+small larvae vs lab-reraed female
+pollen ball vs new female
+small larvae vs new female
+
+Plot differences
+
+```{r dispersion-6}
+boxplot(beta.ps.rare, las = 3, xlab = "")
+#plot(TukeyHSD(beta.ps.t))
+```
+
+
+
+# Alpha diversity
+
+## All data
+
+### Estimate Shannon diversity
+
+Using a non-filtered phyloseq object after warning received when using 'ps'. 
+Warning said better to use non-filtered data. It detected this based on few 
+singletons.
+
+
+```{r alpha-1}
+samples.ps.decon <- phyloseq::sample_data(ps.decon)
+ps.shannon <- estimate_richness(ps.decon,split=TRUE,measures="Shannon")
+samples.ps.shannon <- merge(samples.ps.decon, ps.shannon, by=0, all = TRUE)
+levels(samples.ps.shannon$sample_type_collapsed)
+```
+
+
+#### plot distribution
+
+```{r alpha-2}
+boxplot(Shannon ~ sample_type_collapsed, data = samples.ps.shannon)
+histogram(samples.ps.shannon$Shannon)
+min(samples.ps.shannon$Shannon)
+max(samples.ps.shannon$Shannon)
+descdist(samples.ps.shannon$Shannon, boot = 50)
+descdist((samples.ps.shannon$Shannon)^0.5, boot = 50)
+histogram((samples.ps.shannon$Shannon)^0.5)
+qqp(samples.ps.shannon$Shannon^0.5, "norm")
+ad.test(samples.ps.shannon$Shannon^0.5)
+```
+
+
+#### Test for significant differences
+
+From https://www.juliapilowsky.com/2018/10/19/a-practical-guide-to-mixed-models-in-r/
+
+>  If your random effects are nested, or you have only one random effect, 
+and if your data are balanced (i.e., similar sample sizes in each factor 
+group) set REML to FALSE, because you can use maximum likelihood. 
+
+```{r alpha-3}
+shannon.glm.0 <- lmer((Shannon)^0.5 ~ 1 + (1|bed), 
+                       data = samples.ps.shannon, 
+                      REML = FALSE)
+summary(shannon.glm.0)
+shannon.glm.1 <- lmer((Shannon)^0.5 ~ sample_type_collapsed + (1|bed), 
+                       data = samples.ps.shannon, REML = FALSE)
+summary(shannon.glm.1)
+emmeans(shannon.glm.1, list(pairwise ~ sample_type_collapsed), adjust = "tukey")
+anova(shannon.glm.1)
+anova(shannon.glm.0, shannon.glm.1)
+plot(shannon.glm.1)
+```
+
+Cell wall has significantly higher alpha diversity than all other samples
+
+Lab-reared females are significantly different from prepupae
+
+
+All others no significant differences
+
+
+#### Alpha diversity plots
+
+```{r alpha-4}
+samples.ps.shannon %>%
+  group_by(sample_type_collapsed, sample_type_order) %>% 
+  summarise_at(vars(Shannon), funs(median(., na.rm = TRUE)))
+```
+
+
+```{r alpha-5}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_shannon-Fig2B.svg")
+p.alpha.shannon <- ggplot(samples.ps.shannon, aes(x = sample_type_order, 
+                                    y = Shannon)) + 
+        geom_boxplot(fill = "#3c697e") + 
+        geom_jitter(color = "black", fill = "#acacac", pch = 21, size = 3, alpha = 0.7,
+                    position = position_jitter(width=0.3)) + 
+        annotate("text",x=1,y=8,label="a") +
+        annotate("text",x=2,y=8,label="bc") +
+        annotate("text",x=3,y=8,label="bc") +
+        annotate("text",x=4,y=8,label="b") +
+        annotate("text",x=5,y=8,label="bc") +
+        annotate("text",x=6,y=8,label="c") +
+        annotate("text",x=7,y=8,label="bc") +
+        scale_y_continuous(name = "Shannon index") +
+        scale_x_discrete(palette = pal,
+                         name = "Sample type", 
+                         labels=c("Cell\nwalls", 
+                                  "Pollen\nballs", 
+                                  "Small\nlarvae", 
+                                  "Pre-pupae", 
+                                  "Newly\nemerged\nfemales", 
+                                  "Lab-reared\nfemales",
+                                  "Nesting\nfemales")) + 
+        theme(text = element_text(color="black",size = 14), 
+              axis.title = element_text(color="black"), 
+              axis.text.x = element_text(color="black",size = 10), 
+              axis.text.y = element_text(color="black",size = 12), 
+              legend.position = 'none', 
+              legend.background = element_blank(),
+              legend.title = element_blank(),
+              panel.background = element_rect(fill = "white"),
+              panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.line = element_line(size = 0.5, 
+                                       linetype = "solid", 
+                                       colour = "black"))
+print(p.alpha.shannon)
+dev.off()
+p.alpha.shannon
+```
+
+
+
+## Rarefied (non-filtered) data
+
+### Estimate Shannon diversity
+
+Using a non-filtered phyloseq object after warning received when using 'ps'. 
+Warning said better to use non-filtered data. It detected this based on few 
+singletons.
+
+
+```{r alpha-6}
+samples.ps.decon.rare <- phyloseq::sample_data(ps.decon.rare)
+ps.shannon.rare <- estimate_richness(ps.decon.rare,split=TRUE,
+                                     measures="Shannon")
+samples.ps.shannon.rare <- merge(samples.ps.decon.rare, ps.shannon.rare, 
+                                 by=0, all = TRUE)
+levels(samples.ps.shannon.rare$sample_type_collapsed)
+```
+
+
+#### plot distribution
+
+```{r alpha-7}
+boxplot(Shannon ~ sample_type_collapsed, data = samples.ps.shannon.rare,
+        las = 3, xlab = "")
+histogram(samples.ps.shannon.rare$Shannon)
+min(samples.ps.shannon.rare$Shannon)
+max(samples.ps.shannon.rare$Shannon)
+descdist(samples.ps.shannon.rare$Shannon, boot = 50)
+descdist((samples.ps.shannon.rare$Shannon)^0.5, boot = 50)
+histogram((samples.ps.shannon.rare$Shannon)^0.5)
+qqp(samples.ps.shannon.rare$Shannon^0.5, "norm")
+ad.test(samples.ps.shannon.rare$Shannon^0.5)
+```
+
+
+#### Test for significant differences
+
+From https://www.juliapilowsky.com/2018/10/19/a-practical-guide-to-mixed-models-in-r/
+
+>  If your random effects are nested, or you have only one random effect, 
+and if your data are balanced (i.e., similar sample sizes in each factor 
+group) set REML to FALSE, because you can use maximum likelihood. 
+
+```{r alpha-8}
+shannon.glm.0 <- lmer((Shannon)^0.5 ~ 1 + (1|bed), 
+                       data = samples.ps.shannon.rare, 
+                      REML = FALSE)
+summary(shannon.glm.0)
+shannon.glm.1 <- lmer((Shannon)^0.5 ~ sample_type_collapsed + (1|bed), 
+                       data = samples.ps.shannon.rare, REML = FALSE)
+summary(shannon.glm.1)
+emmeans(shannon.glm.1, list(pairwise ~ sample_type_collapsed), adjust = "tukey")
+anova(shannon.glm.1)
+anova(shannon.glm.0, shannon.glm.1)
+plot(shannon.glm.1)
+```
+
+Cell wall has significantly higher alpha diversity than all other samples
+
+Prepupae significantly different from lab-reared females, pollen balls, 
+and small larvae
+
+All others no significant differences
+
+
+#### Alpha diversity plots
+
+```{r alpha-9}
+samples.ps.shannon.rare %>%
+  group_by(sample_type_collapsed, sample_type_order) %>% 
+  summarise_at(vars(Shannon), funs(median(., na.rm = TRUE)))
+```
+
+
+```{r alpha-10}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_rare_shannon.svg")
+p.alpha.rare <- ggplot(samples.ps.shannon.rare, aes(x = sample_type_order, 
+                                    y = Shannon)) + 
+        geom_boxplot(fill = "#0d98ba") + 
+        geom_jitter(color = "black", fill = "#e0e0e0", pch = 21, size = 3, 
+                    position = position_jitter(width=0.2)) + 
+        annotate("text",x=1,y=6,label="a") +
+        annotate("text",x=2,y=6,label="b") +
+        annotate("text",x=3,y=6,label="b") +
+        annotate("text",x=4,y=6,label="c") +
+        annotate("text",x=5,y=6,label="bc") +
+        annotate("text",x=6,y=6,label="b") +
+        annotate("text",x=7,y=6,label="bc") +
+        scale_y_continuous(name = "Shannon index") +
+        scale_x_discrete(palette = pal,
+                         name = "Sample type", 
+                         labels=c("Cell\nwalls", 
+                                  "Pollen\nballs", 
+                                  "Small\nlarvae", 
+                                  "Pre-pupae", 
+                                  "Newly\nemerged\nfemales", 
+                                  "Lab-reared\nfemales",
+                                  "Nesting\nfemales")) + 
+        theme(text = element_text(color="black",size = 14), 
+              axis.title = element_text(color="black"), 
+              axis.text.x = element_text(color="black",size = 10), 
+              axis.text.y = element_text(color="black",size = 12), 
+              legend.position = 'none', 
+              legend.background = element_blank(),
+              legend.title = element_blank(),
+              panel.background = element_rect(fill = "white"),
+              panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.line = element_line(size = 0.5, 
+                                       linetype = "solid", 
+                                       colour = "black"))
+print(p.alpha.rare)
+dev.off()
+p.alpha.rare
+```
+
+# Clustering
+
+https://rstudio-pubs-static.s3.amazonaws.com/68544_06343669257d4f35aaca449f9ff1e6f7.html
+
+Did not work: 
+
+https://stackoverflow.com/questions/18802519/label-and-color-leaf-dendrogram   
+
+http://statweb.stanford.edu/~susan/summer12/phyloseq-demosh.html   
+
+```{r cluster-1}
+hClustering <- hclust(bc.ps.t, method = 'average')
+hcd = as.dendrogram(hClustering)
+# hcd is now actually of class "dendogram"
+cbPalette <- c("#CBD588", "#5F7FC7", "orange", "#DA5724",
+               "#508578", "#CD9BCD", "#AD6F3B")
+colorCode <- c("cell wall"=cbPalette[1], 
+               "lab-reared female" = cbPalette[6], 
+               "nesting female" = cbPalette[7], 
+               "newly emerged female" = cbPalette[5], 
+               "pollen ball" = cbPalette[2], 
+               "pre-pupa" = cbPalette[4], 
+               "small larva" = cbPalette[3])
+# just a character vector
+labels_colors(hcd) <- colorCode[sample_data(ps.rab)$sample_type_collapsed][order.dendrogram(hcd)]
+# the [order.dendrogram(hcd)] puts the colours in the right order
+labels(hcd) <- sample_data(ps.rab)$combo_name[order.dendrogram(hcd)]
+```
+
+```{r cluster-2}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_cluster-FigS3.svg")
+plot(hcd)
+dev.off()
+```
+
+# Differential abundance
+
+Can use DESeq2, ANCOM (ancom.R) or eBay
+
+## Adults only data
+      
+
+### DESeq2 - stats
+
+```{r deseq-1}
+de.all <- phyloseq_to_deseq2(ps, ~ sample_type_collapsed + bed)
+geomean <- function(x,na.rm=TRUE){
+  exp(sum(log(x[x > 0]),na.rm=na.rm) / length(x))
+}
+de.all.geomeans <- apply(counts(de.all),1,geomean)
+de.all <- estimateSizeFactors(de.all,geoMeans = de.all.geomeans)
+de.all <- DESeq(de.all, fitType = "local")
+alpha = 0.05
+```
+
+Parse pairwise results The following code does fdr correction on a gene-by-gene basis, 
+which will have less power than using the hierarchical method
+
+
+*newly emerged female vs lab-reared female*
+
+```{r deseq-2}
+diffab.new_lab <- results(de.all, contrast = c("sample_type_collapsed", 
+                                               "newly emerged female", 
+                                               "lab-reared female"))
+diffab.new_lab <- diffab.new_lab[order(diffab.new_lab$padj, na.last = NA),]
+diffab.new_lab.p05 <- diffab.new_lab[(diffab.new_lab$padj < 
+                                        alpha & !is.na(diffab.new_lab$padj)),]
+diffab.new_lab.p05 = cbind(as(diffab.new_lab.p05, "data.frame"), 
+                           as(tax_table(ps)[rownames(diffab.new_lab.p05), ], "matrix"))
+dim(diffab.new_lab.p05)
+```
+
+*newly emerged female vs nesting female*
+
+```{r deseq-3}
+diffab.new_rep <- results(de.all, contrast = c("sample_type_collapsed", 
+                                               "newly emerged female", 
+                                               "nesting female"))
+diffab.new_rep <- diffab.new_rep[order(diffab.new_rep$padj, na.last = NA),]
+diffab.new_rep.p05 <- diffab.new_rep[(diffab.new_rep$padj < 
+                                        alpha & !is.na(diffab.new_rep$padj)),]
+diffab.new_rep.p05 = cbind(as(diffab.new_rep.p05, "data.frame"), 
+                           as(tax_table(ps)[rownames(diffab.new_rep.p05), ], "matrix"))
+dim(diffab.new_rep.p05)
+```
+
+*lab-reared emerged female vs nesting female*
+
+```{r deseq-4}
+diffab.lab_rep <- results(de.all, contrast = c("sample_type_collapsed", 
+                                               "lab-reared female", 
+                                               "nesting female"))
+diffab.lab_rep <- diffab.lab_rep[order(diffab.lab_rep$padj, na.last = NA),]
+diffab.lab_rep.p05 <- diffab.lab_rep[(diffab.lab_rep$padj < 
+                                        alpha & !is.na(diffab.lab_rep$padj)),]
+diffab.lab_rep.p05 = cbind(as(diffab.lab_rep.p05, "data.frame"), 
+                           as(tax_table(ps)[rownames(diffab.lab_rep.p05), ], "matrix"))
+dim(diffab.lab_rep.p05)
+```
+
+Write out the results
+
+```{r deseq-5}
+write.csv(diffab.new_lab.p05, file = "diffab_new_lab.csv", quote = FALSE)
+write.csv(diffab.new_rep.p05, file = "diffab_new_rep.csv", quote = FALSE)
+write.csv(diffab.lab_rep.p05, file = "diffab_lab_rep.csv", quote = FALSE)
+```
+
+### DESeq2 - plots
+
+*Newly emerged vs lab-reared females*
+
+```{r deseq-6}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_dab_new_lab-Fig3A.svg")
+diffab.new_lab.p05.r = subset(diffab.new_lab.p05, !is.na(Family))
+diffab.new_lab.p05.r = subset(diffab.new_lab.p05.r, Family != "")
+# Phylum order
+x = tapply(diffab.new_lab.p05.r$log2FoldChange, diffab.new_lab.p05.r$Phylum, 
+           function(x) max(x))
+x = sort(x, TRUE)
+diffab.new_lab.p05.r$Phylum = 
+  factor(as.character(diffab.new_lab.p05.r$Phylum), levels=names(x))
+# Family order
+x = tapply(diffab.new_lab.p05.r$log2FoldChange, 
+           diffab.new_lab.p05.r$Family, function(x) max(x))
+x = sort(x, TRUE)
+diffab.new_lab.p05.r$Family = 
+  factor(as.character(diffab.new_lab.p05.r$Family), levels=names(x))
+p.da.new_lab <- ggplot(diffab.new_lab.p05.r, aes(y=Family, 
+                                                     x=log2FoldChange, 
+                                                     color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(size = 5) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5)) + 
+  scale_color_manual(values = c("D_1__Proteobacteria" = "#1B9E77", 
+                                "D_1__Chloroflexi" = "#7570B3", 
+                                "D_1__Firmicutes" = "#D95F02", 
+                              "D_1__Actinobacteria" = "#E6AB02"))
+print(p.da.new_lab)
+dev.off()
+p.da.new_lab
+```
+
+*Newly emerged vs reproductive females*
+
+```{r deseq-7}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_dab_new_rep-Fig3B.svg")
+diffab.new_rep.p05.r = subset(diffab.new_rep.p05, !is.na(Family))
+diffab.new_rep.p05.r = subset(diffab.new_rep.p05.r, Family != "")
+# Phylum order
+x = tapply(diffab.new_rep.p05.r$log2FoldChange, diffab.new_rep.p05.r$Phylum, 
+           function(x) max(x))
+x = sort(x, TRUE)
+diffab.new_rep.p05.r$Phylum = 
+  factor(as.character(diffab.new_rep.p05.r$Phylum), levels=names(x))
+# Family order
+x = tapply(diffab.new_rep.p05.r$log2FoldChange, 
+           diffab.new_rep.p05.r$Family, function(x) max(x))
+x = sort(x, TRUE)
+diffab.new_rep.p05.r$Family = 
+  factor(as.character(diffab.new_rep.p05.r$Family), levels=names(x))
+p.da.new_rep <- ggplot(diffab.new_rep.p05.r, aes(y=Family, 
+                                                     x=log2FoldChange, 
+                                                     color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(size = 5) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5)) + 
+  scale_color_manual(values = c("D_1__Proteobacteria" = "#1B9E77", 
+                                "D_1__Chloroflexi" = "#7570B3", 
+                                "D_1__Firmicutes" = "#D95F02", 
+                                "D_1__Actinobacteria" = "#E6AB02"))
+print(p.da.new_rep)
+dev.off()
+p.da.new_rep
+```
+
+*Lab-reared vs reproductive females*
+
+```{r deseq-8}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_dab_lab_rep-Fig3C.svg")
+diffab.lab_rep.p05.r = subset(diffab.lab_rep.p05, !is.na(Family))
+diffab.lab_rep.p05.r = subset(diffab.lab_rep.p05.r, Family != "")
+# Phylum order
+x = tapply(diffab.lab_rep.p05.r$log2FoldChange, diffab.lab_rep.p05.r$Phylum, 
+           function(x) max(x))
+x = sort(x, TRUE)
+diffab.lab_rep.p05.r$Phylum = 
+  factor(as.character(diffab.lab_rep.p05.r$Phylum), levels=names(x))
+# Family order
+x = tapply(diffab.lab_rep.p05.r$log2FoldChange, 
+           diffab.lab_rep.p05.r$Family, function(x) max(x))
+x = sort(x, TRUE)
+diffab.lab_rep.p05.r$Family = 
+  factor(as.character(diffab.lab_rep.p05.r$Family), levels=names(x))
+p.da.lab_rep <- ggplot(diffab.lab_rep.p05.r, aes(y=Family, 
+                                                     x=log2FoldChange, 
+                                                     color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(size = 5) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5)) + 
+  scale_color_manual(values = c("D_1__Proteobacteria" = "#1B9E77", 
+                                "D_1__Chloroflexi" = "#7570B3", 
+                                "D_1__Firmicutes" = "#D95F02", 
+                                "D_1__Actinobacteria" = "#E6AB02"))
+print(p.da.lab_rep)
+dev.off()
+p.da.lab_rep
+```
+
+
+## Rarefied data
+
+### DESeq2 - stats
+
+```{r deseq-9}
+de.rare <- phyloseq_to_deseq2(ps.rare, ~ sample_type_collapsed + bed)
+geomean <- function(x,na.rm=TRUE){
+  exp(sum(log(x[x > 0]),na.rm=na.rm) / length(x))
+}
+de.rare.geomeans <- apply(counts(de.rare),1,geomean)
+de.rare <- estimateSizeFactors(de.rare,geoMeans = de.rare.geomeans)
+de.rare <- DESeq(de.rare, fitType = "local")
+alpha = 0.05
+```
+
+Parse pairwise results The following code does fdr correction on a gene-by-gene basis, 
+which will have less power than using the hierarchical method
+
+
+*newly emerged female vs lab-reared female*
+
+```{r deseq-10}
+diffab.rare.new_lab <- results(de.rare, contrast = c("sample_type_collapsed", 
+                                               "newly emerged female", 
+                                               "lab-reared female"))
+diffab.rare.new_lab <- diffab.rare.new_lab[order(diffab.rare.new_lab$padj, na.last = NA),]
+diffab.rare.new_lab.p05 <- diffab.rare.new_lab[(diffab.rare.new_lab$padj < 
+                                        alpha & !is.na(diffab.rare.new_lab$padj)),]
+#diffab.rare.new_lab.p05 = cbind(as(diffab.rare.new_lab.p05, "data.frame"), as(tax_table(ps.rare)[rownames(diffab.rare.new_lab.p05), ], "matrix"))
+```
+
+This produces an empty dataframe, because there are no differentially abundant taxa.
+
+*newly emerged female vs nesting female*
+
+```{r deseq-11}
+diffab.rare.new_rep <- results(de.rare, contrast = c("sample_type_collapsed", 
+                                               "newly emerged female", 
+                                               "nesting female"))
+diffab.rare.new_rep <- diffab.rare.new_rep[order(diffab.rare.new_rep$padj, na.last = NA),]
+diffab.rare.new_rep.p05 <- diffab.rare.new_rep[(diffab.rare.new_rep$padj < 
+                                        alpha & !is.na(diffab.rare.new_rep$padj)),]
+diffab.rare.new_rep.p05 = cbind(as(diffab.rare.new_rep.p05, "data.frame"), as(tax_table(ps.rare)[rownames(diffab.rare.new_rep.p05), ], "matrix"))
+```
+
+*lab-reared emerged female vs nesting female*
+
+```{r deseq-12}
+diffab.rare.lab_rep <- results(de.rare, contrast = c("sample_type_collapsed", 
+                                               "lab-reared female", 
+                                               "nesting female"))
+diffab.rare.lab_rep <- diffab.rare.lab_rep[order(diffab.rare.lab_rep$padj, na.last = NA),]
+diffab.rare.lab_rep.p05 <- diffab.rare.lab_rep[(diffab.rare.lab_rep$padj < 
+                                        alpha & !is.na(diffab.rare.lab_rep$padj)),]
+diffab.rare.lab_rep.p05 = cbind(as(diffab.rare.lab_rep.p05, "data.frame"), as(tax_table(ps.rare)[rownames(diffab.rare.lab_rep.p05), ], "matrix"))
+```
+
+Write out the results
+
+```{r deseq-13}
+write.csv(diffab.rare.new_lab.p05, file = "diffab_rare_new_lab.csv", quote = FALSE)
+write.csv(diffab.rare.new_rep.p05, file = "diffab_rare_new_rep.csv", quote = FALSE)
+write.csv(diffab.rare.lab_rep.p05, file = "diffab_rare_lab_rep.csv", quote = FALSE)
+```
+
+### DESeq2 - plots
+
+
+*Newly emerged vs reproductive females*
+
+```{r deseq-14}
+diffab.rare.new_rep.p05.r = subset(diffab.rare.new_rep.p05, !is.na(Family))
+diffab.rare.new_rep.p05.r = subset(diffab.rare.new_rep.p05.r, Family != "")
+# Phylum order
+x = tapply(diffab.rare.new_rep.p05.r$log2FoldChange, diffab.rare.new_rep.p05.r$Phylum, 
+           function(x) max(x))
+x = sort(x, TRUE)
+diffab.rare.new_rep.p05.r$Phylum = 
+  factor(as.character(diffab.rare.new_rep.p05.r$Phylum), levels=names(x))
+# Family order
+x = tapply(diffab.rare.new_rep.p05.r$log2FoldChange, 
+           diffab.rare.new_rep.p05.r$Family, function(x) max(x))
+x = sort(x, TRUE)
+diffab.rare.new_rep.p05.r$Family = 
+  factor(as.character(diffab.rare.new_rep.p05.r$Family), levels=names(x))
+p.da.rare.new_rep <- ggplot(diffab.rare.new_rep.p05.r, aes(y=Family, 
+                                                     x=log2FoldChange, 
+                                                     color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(size = 5) + 
+  scale_color_manual(values = c("D_1__Proteobacteria" = "#1B9E77", 
+                                "D_1__Firmicutes" = "#D95F02", 
+                                "D_1__Actinobacteria" = "#E6AB02")) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+print(p.da.rare.new_rep)
+```
+
+*Lab-reared vs reproductive females*
+
+```{r deseq-15}
+diffab.rare.lab_rep.p05.r = subset(diffab.rare.lab_rep.p05, !is.na(Family))
+diffab.rare.lab_rep.p05.r = subset(diffab.rare.new_rep.p05.r, Family != "")
+# Phylum order
+x = tapply(diffab.rare.new_rep.p05.r$log2FoldChange, diffab.rare.lab_rep.p05.r$Phylum, 
+           function(x) max(x))
+x = sort(x, TRUE)
+diffab.rare.lab_rep.p05.r$Phylum = 
+  factor(as.character(diffab.rare.lab_rep.p05.r$Phylum), levels=names(x))
+# Family order
+x = tapply(diffab.rare.lab_rep.p05.r$log2FoldChange, 
+           diffab.rare.lab_rep.p05.r$Family, function(x) max(x))
+x = sort(x, TRUE)
+diffab.rare.lab_rep.p05.r$Family = 
+  factor(as.character(diffab.rare.lab_rep.p05.r$Family), levels=names(x))
+p.da.rare.lab_rep <- ggplot(diffab.rare.lab_rep.p05.r, aes(y=Family, 
+                                                     x=log2FoldChange, 
+                                                     color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(size = 5) + 
+  scale_color_manual(values = c("D_1__Proteobacteria" = "#1B9E77", 
+                                "D_1__Firmicutes" = "#D95F02", 
+                                "D_1__Actinobacteria" = "#E6AB02")) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+print(p.da.rare.lab_rep)
+```
+
+# Bar Plots
+
+#### All data
+
+Plot the relative abundance of Phyla that contribute more than 2% of the relative abundance of each sample. 
+Prune out the low abundance taxa for this visualization.
+Following http://deneflab.github.io/MicrobeMiseq/demos/mothur_2_phyloseq.html.
+
+```{r bar-1}
+# by phylum
+ps_phylum <- ps %>%
+  tax_glom(taxrank = "Phylum") %>%                     # agglomerate at phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.02) %>%                         # Filter out low abundance taxa
+  arrange(Phylum)                                      # Sort data frame alphabetically by phylum
+levels(ps_phylum$Phylum)
+```
+
+25 phyla
+
+```{r bar-2}
+ps_phylum$sample_type_order_n[ps_phylum$sample_type_order=="A"] <- 1
+ps_phylum$sample_type_order_n[ps_phylum$sample_type_order=="B"] <- 2
+ps_phylum$sample_type_order_n[ps_phylum$sample_type_order=="C"] <- 3
+ps_phylum$sample_type_order_n[ps_phylum$sample_type_order=="D"] <- 4
+ps_phylum$sample_type_order_n[ps_phylum$sample_type_order=="E"] <- 5
+ps_phylum$sample_type_order_n[ps_phylum$sample_type_order=="F"] <- 6
+ps_phylum$sample_type_order_n[ps_phylum$sample_type_order=="G"] <- 7
+```
+
+Colors came from 64-color panel here:
+http://godsnotwheregodsnot.blogspot.com/2012/09/color-distribution-methodology.html
+
+```{r bar-3}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_barplot_phylum-Fig1B.svg")
+p.ps.bar.phylum <- ggplot(ps_phylum, aes(x=reorder(combo_name,-sample_type_order_n), 
+                                         y=Abundance, 
+                                         fill = Phylum)) +
+  geom_bar(stat="identity") + coord_flip() +
+  theme(axis.text.x = element_text(size=12),
+              panel.background = element_rect(fill = "white"),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),) +
+  ylab("Relative Abundance (Phyla > 2%)") +
+  xlab("Sample") + 
+  ylim(0,1)  + 
+  scale_fill_manual(values = c("D_1__Proteobacteria" = "#00846F", 
+                                "D_1__Firmicutes" = "#8FCAFF", 
+                                "D_1__Actinobacteria" = "#013349", 
+                                "D_1__Chloroflexi" = "#C0B9B2",
+                                "D_1__Acidobacteria" = "#0086ED",
+                                "D_1__Armatimonadetes" = "#E7298A",
+                                "D_1__Bacteroidetes" = "#66A61E",
+                                "D_1__BRC1" = "#A6761D",
+                                "D_1__Chlamydiae" = "#666666",
+                                "D_1__Cyanobacteria" = "#D95F02",
+                                "D_1__Dadabacteria" = "#000035",
+                                "D_1__Deinococcus-Thermus" = "#7570B3",
+                                "D_1__Dependentiae" = "#A1C299",
+                                "D_1__Euryarchaeota" = "#300018",
+                                "D_1__Gemmatimonadetes" = "#0AA6D8",
+                                "D_1__Hydrogenedentes" = "#E6AB02",
+                                "D_1__Latescibacteria" = "#1B9E77",
+                                "D_1__Nanoarchaeaeota" = "#372101",
+                                "D_1__Nitrospirae" = "#FFB500",
+                                "D_1__Patescibacteria" = "#C2FFED",
+                                "D_1__Planctomycetes" = "#7B4F4B",
+                                "D_1__Rokubacteria" = "#CC0744",
+                                "D_1__Thaumarchaeota" = "#A079BF",
+                                "D_1__Verrucomicrobia" = "#C2FF99",
+                                "D_1__WPS-2" = "#001E09"))
+
+print(p.ps.bar.phylum)
+dev.off()
+p.ps.bar.phylum
+```
+
+
+#### Rarefied data
+
+```{r bar-4}
+# by phylum
+ps.rare_phylum <- ps.rare %>%
+  tax_glom(taxrank = "Phylum") %>%                     # agglomerate at phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.02) %>%                         # Filter out low abundance taxa
+  arrange(Phylum)                                      # Sort data frame alphabetically by phylum
+length(levels(ps.rare_phylum$Phylum))
+```
+
+
+```{r bar-5}
+ps.rare_phylum$sample_type_order_n[ps.rare_phylum$sample_type_order=="A"] <- 1
+ps.rare_phylum$sample_type_order_n[ps.rare_phylum$sample_type_order=="B"] <- 2
+ps.rare_phylum$sample_type_order_n[ps.rare_phylum$sample_type_order=="C"] <- 3
+ps.rare_phylum$sample_type_order_n[ps.rare_phylum$sample_type_order=="D"] <- 4
+ps.rare_phylum$sample_type_order_n[ps.rare_phylum$sample_type_order=="E"] <- 5
+ps.rare_phylum$sample_type_order_n[ps.rare_phylum$sample_type_order=="F"] <- 6
+ps.rare_phylum$sample_type_order_n[ps.rare_phylum$sample_type_order=="G"] <- 7
+```
+
+Colors came from 64-color panel here:
+http://godsnotwheregodsnot.blogspot.com/2012/09/color-distribution-methodology.html
+
+```{r bar-6}
+svg("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_barplot_rare_phylum.svg")
+p.ps.rare.bar.phylum <- ggplot(ps.rare_phylum, aes(x=reorder(combo_name,-sample_type_order_n), 
+                                         y=Abundance, 
+                                         fill = Phylum)) +
+  geom_bar(stat="identity") + coord_flip() +
+  theme(axis.text.x = element_text(size=12),
+              panel.background = element_rect(fill = "white"),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),) +
+  ylab("Relative Abundance (Phyla > 2%)") +
+  xlab("Sample") + 
+  ylim(0,1)  + 
+  scale_fill_manual(values = c("D_1__Proteobacteria" = "#00846F", 
+                                "D_1__Firmicutes" = "#8FCAFF", 
+                                "D_1__Actinobacteria" = "#013349", 
+                                "D_1__Chloroflexi" = "#C0B9B2",
+                                "D_1__Acidobacteria" = "#0086ED",
+                                "D_1__Armatimonadetes" = "#E7298A",
+                                "D_1__Bacteroidetes" = "#66A61E",
+                                "D_1__BRC1" = "#A6761D",
+                                "D_1__Chlamydiae" = "#666666",
+                                "D_1__Cyanobacteria" = "#D95F02",
+                                "D_1__Dadabacteria" = "#000035",
+                                "D_1__Deinococcus-Thermus" = "#7570B3",
+                                "D_1__Dependentiae" = "#A1C299",
+                                "D_1__Euryarchaeota" = "#300018",
+                                "D_1__Gemmatimonadetes" = "#0AA6D8",
+                                "D_1__Hydrogenedentes" = "#E6AB02",
+                                "D_1__Latescibacteria" = "#1B9E77",
+                                "D_1__Nanoarchaeaeota" = "#372101",
+                                "D_1__Nitrospirae" = "#FFB500",
+                                "D_1__Patescibacteria" = "#C2FFED",
+                                "D_1__Planctomycetes" = "#7B4F4B",
+                                "D_1__Rokubacteria" = "#CC0744",
+                                "D_1__Thaumarchaeota" = "#A079BF",
+                                "D_1__Verrucomicrobia" = "#C2FF99",
+                                "D_1__WPS-2" = "#001E09"))
+print(p.ps.rare.bar.phylum)
+dev.off()
+p.ps.rare.bar.phylum
+```
+
+Investigate Firmicutes
+
+```{r bar-7}
+ps.Firm <- subset_taxa(ps, Phylum == "D_1__Firmicutes")
+ps.Firm_Genus <- ps.Firm %>%
+  tax_glom(taxrank = "Genus") %>%                     # agglomerate at phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.02) %>%                         # Filter out low abundance taxa
+  arrange(Genus)                                      # Sort data frame alphabetically by phylum
+length(levels(ps.Firm_Genus$Genus))
+#
+ps.Firm_Genus$sample_type_order_n[ps.Firm_Genus$sample_type_order=="A"] <- 1
+ps.Firm_Genus$sample_type_order_n[ps.Firm_Genus$sample_type_order=="B"] <- 2
+ps.Firm_Genus$sample_type_order_n[ps.Firm_Genus$sample_type_order=="C"] <- 3
+ps.Firm_Genus$sample_type_order_n[ps.Firm_Genus$sample_type_order=="D"] <- 4
+ps.Firm_Genus$sample_type_order_n[ps.Firm_Genus$sample_type_order=="E"] <- 5
+ps.Firm_Genus$sample_type_order_n[ps.Firm_Genus$sample_type_order=="F"] <- 6
+ps.Firm_Genus$sample_type_order_n[ps.Firm_Genus$sample_type_order=="G"] <- 7
+#
+ps.Firm_Genus.bar <- ggplot(ps.Firm_Genus, aes(x=reorder(combo_name,-sample_type_order_n), 
+                                         y=Abundance, 
+                                         fill = Genus)) +
+  geom_bar(stat="identity") + coord_flip() +
+  theme(axis.text.x = element_text(size=12),
+              panel.background = element_rect(fill = "white"),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),) +
+  ylab("Relative Abundance (>2%)") +
+  xlab("Sample") + 
+  ylim(0,1) + 
+  scale_fill_manual(values = c("D_5__Anaerocolumna" = "#1B9E77", 
+                                "D_5__Anaerosolibacter" = "#D95F02", 
+                                "D_5__Bacillus" = "#E6AB02", 
+                                "D_5__Cohnella" = "#7570B3",
+                                "D_5__Domibacillus" = "#0086ED",
+                                "D_5__Lactobacillus" = "#013349",
+                                "D_5__Paenibacillus" = "#66A61E",
+                                "D_5__Streptococcus" = "#A6761D",
+                                "D_5__Tyzzerella 3" = "#666666"))  
+ps.Firm_Genus.bar
+```
+
+Investigate Lactobacillus
+
+
+```{r bar-8}
+ps.Lactobacillus <- subset_taxa(ps, Genus == "D_5__Lactobacillus")
+ps.Lactobacillus_Species <- ps.Lactobacillus %>%
+  tax_glom(taxrank = "Species") %>%                     # agglomerate at phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+ # filter(Abundance > 0.02) %>%                         # Filter out low abundance taxa
+  arrange(Species)                                      # Sort data frame alphabetically by phylum
+length(levels(ps.Lactobacillus_Species$Species))
+levels(ps.Lactobacillus_Species$Species)
+```
+
+All Lactobacillus are either micheneri or unnamed
+
+# Correlate physiology with relative abundance
+
+Following https://microbiome.github.io/tutorials/Heatmap.html
+"Cross-correlating data sets"
+
+Use relative abundance instead of log-transformed counts to take into consideration differences in library size.
+
+#### Adults only
+
+```{r corr-1}
+# subset to initial sample only
+#physeq.filter.relab.recipients.init <- subset_samples(physeq.filter.relab.recipients, tx3 == "Initial")
+#physeq.filter.relab.recipients.init
+# get relative abundance data
+otu.adult.relab <- otu_table(ps.adult.rab)
+if(taxa_are_rows(otu.adult.relab)) {
+  otu.adult.relab <- t(otu.adult.relab)
+}
+mat.adult.otu <- as(otu.adult.relab, "matrix")
+ab.adult <- as.data.frame((mat.adult.otu))
+ab.adult <- ab.adult[order(rownames(ab.adult)),]
+ab.adult <- sapply(ab.adult, as.numeric)
+# get phys data
+samples.adult <- phyloseq::sample_data(ps.adult.rab)
+mat.samples.adult <- as(samples.adult, "matrix")
+phy.adult <- as.data.frame(mat.samples.adult)
+# reduce to just phys data of interest
+phy.adult.r <- phy.adult[,c("dg_length_mm",
+                                  "max_terminal_oocyte_mm", 
+                                  "max_stage")]
+phy.adult.r <- phy.adult.r[order(rownames(phy.adult.r)),]
+phy.adult.r <- sapply(phy.adult.r, as.numeric)
+# get to business
+phys.cor.adult <- associate(phy.adult.r, ab.adult, method="pearson",
+                          cth=.1, 
+                          p.adj.method = "BH", 
+                          p.adj.threshold = 0.05)
+length(which(phys.cor.adult$p.adj < 0.05))
+#View(phys.cor.adult)
+```
+
+There are no significant correlations between microbial relative abundance and physiology.
+
+# Taxa specific inquiries
+
+#### L. micheneri
+
+Determine if L. micheneri is in all sample types, including cell walls. 
+
+```{r taxa-1}
+ps.Firm <- subset_taxa(ps, Phylum == "D_1__Firmicutes")
+plot_tree(ps.Firm, shape = "sample_type_collapsed", 
+          color = "Genus",
+          size = "abundance", 
+          #label.tips = "taxa_names",
+          ladderize = "left",
+          nodelabf = nodeplotboot(),
+          #base.spacing = 0.9,
+          #plot.margin = 0.5, 
+          sizebase = 2) 
+```
+
+
+```{r taxa-2}
+ps.Firm <- subset_taxa(ps, Phylum == "D_1__Firmicutes")
+plot_tree(ps.Firm, color = "Genus", 
+          shape = "sample_type_collapsed", 
+          size = "abundance")
+```
+
+```{r taxa-3}
+ps.Firm <- subset_taxa(ps, Phylum == "D_1__Firmicutes")
+plot_tree(ps.Firm, color = "sample_type_collapsed", 
+          shape = "Family", 
+          size = "abundance")
+```
+
+Explore just L. micheneri for clarity
+
+```{r taxa-4}
+ps.Lmich <- subset_taxa(ps, Species == "D_6__Lactobacillus micheneri")
+ps.Lmich.melt <- psmelt(ps.Lmich)
+ps.Lmich.melt$OTU <- factor(ps.Lmich.melt$OTU)
+write.csv(ps.Lmich.melt, file = "Lmich_abundance.csv")
+Lmich.sum <- ddply(ps.Lmich.melt, c("OTU","sample_type_collapsed"), summarise, 
+      mean = mean(Abundance),
+      sd = sd(Abundance),
+      N = length(Abundance), 
+      min = min(Abundance), 
+      max = max(Abundance))
+write.csv(Lmich.sum, file = "TableS2.csv",row.names = FALSE)
+```
+
+```{r taxa-5}
+pdf("C:/Users/Karen/Documents/research/wkdir/nmel_microbiome/qiime2_Oct2020/nmel_pLmich_tree-Fig4.pdf")
+p.Lmich.tree <- plot_tree(ps.Lmich, color = "sample_type_collapsed", 
+          size = "abundance", 
+          #label.tips = "taxa_names",
+          ladderize = "left",
+          nodelabf = nodeplotboot(),
+          base.spacing = 0.1,
+          plot.margin = 0.1, 
+          sizebase = 2) 
+print(p.Lmich.tree)
+dev.off()
+p.Lmich.tree
+```
+
+Get label names
+
+```{r taxa-6}
+plot_tree(ps.Lmich, color = "sample_type_collapsed", 
+          size = "abundance", 
+          label.tips = "taxa_names",
+          ladderize = "left",
+          nodelabf = nodeplotboot(),
+          base.spacing = 0.2,
+          plot.margin = 1.75, 
+          sizebase = 2) 
+```
+
+#### Proteobacteria
+
+Which Proteobacteria are more abundant in nesting females than in sm lv and pollen?
+
+```{r taxa-7}
+ps.Prot <- subset_taxa(ps, Phylum == "D_1__Proteobacteria")
+ps.Prot.sub <- subset_samples(ps.Prot, 
+                              sample_type_collapsed == "small larva" |
+                                sample_type_collapsed == "pollen ball" | 
+                                sample_type_collapsed == "nesting female")
+ps.Prot.sub.fam <- tax_glom(ps.Prot.sub, taxrank = "Family")
+ntaxa(ps.Prot.sub)
+ntaxa(ps.Prot.sub.fam)
+ps.Prot.sub.fam.melt <- psmelt(ps.Prot.sub.fam)
+Prot.fam.sum <- ddply(ps.Prot.sub.fam.melt, c("Family","sample_type_collapsed"), summarise, 
+      mean = mean(Abundance),
+      sd = sd(Abundance),
+      N = length(Abundance), 
+      min = min(Abundance), 
+      max = max(Abundance))
+```
+
+
+```{r taxa-8}
+
+plot_tree(ps.Prot.sub.fam, color = "sample_type_collapsed", 
+          size = "abundance", 
+          label.tips = "Family",
+          ladderize = "left",
+          nodelabf = nodeplotboot(),
+          base.spacing = 0.1,
+          plot.margin = 0.1, 
+          sizebase = 2) 
+```
+
+
+
+# Bookkeeping
+
+##Export data
+
+```{r book-1}
+data.out <- psmelt(ps)
+write.table(data.out, file = "nmel_microbiome_phyloseq_out.txt", 
+            sep = "\t", row.names = FALSE, quote = FALSE)
+```
+##Citations, version #s, etc.
+
+
+```{r book-2}
+packageVersion("tidyverse"); citation("tidyverse")
+packageVersion("phyloseq"); citation("phyloseq")
+packageVersion("vegan"); citation("vegan")
+packageVersion("RVAideMemoire"); citation("RVAideMemoire")
+packageVersion("qiime2R"); citation("qiime2R")
+packageVersion("ggplot2"); citation("ggplot2")
+packageVersion("Biostrings"); citation("Biostrings")
+packageVersion("plyr"); citation("plyr")
+packageVersion("dplyr"); citation("dplyr")
+packageVersion("reshape2"); citation("reshape2")
+packageVersion("devtools"); citation("devtools")
+packageVersion("data.table"); citation("data.table")
+packageVersion("nortest"); citation("nortest")
+packageVersion("glmm"); citation("glmm")
+packageVersion("lme4"); citation("lme4")
+packageVersion("lmerTest"); citation("lmerTest")
+packageVersion("emmeans"); citation("emmeans")
+packageVersion("car")
+packageVersion("DESeq2"); citation("DESeq2")
+packageVersion("microbiome"); citation("microbiome")
+packageVersion("decontam"); citation("decontam")
+packageVersion("eBay"); citation("eBay")
+packageVersion("forcats"); citation("forcats")
+packageVersion("fitdistrplus"); citation("fitdistrplus")
+packageVersion("caret"); citation("caret")
+packageVersion("dendextend"); citation("dendextend")
+citation()
+R.version.string
+```
